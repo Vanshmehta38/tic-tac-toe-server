@@ -1,3 +1,6 @@
+import dotenv from "dotenv";
+dotenv.config();
+
 import express from "express";
 import http from "http";
 import cors from "cors";
@@ -12,14 +15,13 @@ app.get("/", (_req, res) => {
 
 const server = http.createServer(app);
 
+const allowedOrigins = process.env.CLIENT_URLS
+  ? process.env.CLIENT_URLS.split(",")
+  : ["http://localhost:3000"];
+
 const io = new Server(server, {
   cors: {
-    origin: [
-      "http://localhost:3000",
-      "http://127.0.0.1:3000",
-      "http://localhost:5173",
-      "http://127.0.0.1:5173",
-    ],
+    origin: allowedOrigins,
     methods: ["GET", "POST"],
     credentials: true,
   },
