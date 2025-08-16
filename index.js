@@ -39,6 +39,7 @@ function emptyState() {
     line: null,
     players: {}, // { userId: { symbol, socketId } }
     adminId: null, // userId of admin
+    scores: { X: 0, O: 0, draw: 0 }, // ✅ Scoreboard
   };
 }
 
@@ -113,6 +114,7 @@ io.on("connection", (socket) => {
       players: Object.values(room.players)
         .map((p) => p.symbol)
         .filter(Boolean),
+      scores: room.scores,
     });
   });
 
@@ -135,6 +137,11 @@ io.on("connection", (socket) => {
     if (result) {
       room.winner = result.winner;
       room.line = result.line;
+
+      // ✅ Update scores
+      if (room.winner === "X") room.scores.X++;
+      else if (room.winner === "O") room.scores.O++;
+      else if (room.winner === "draw") room.scores.draw++;
     } else {
       room.currentPlayer = room.currentPlayer === "X" ? "O" : "X";
     }
@@ -147,6 +154,7 @@ io.on("connection", (socket) => {
       players: Object.values(room.players)
         .map((p) => p.symbol)
         .filter(Boolean),
+      scores: room.scores,
     });
   });
 
@@ -158,7 +166,6 @@ io.on("connection", (socket) => {
     // ✅ Only admin can reset
     if (myUserId !== room.adminId) return;
 
-    // Save last winner before clearing
     const lastWinner = room.winner;
 
     // Reset board state
@@ -169,14 +176,13 @@ io.on("connection", (socket) => {
 
     const playerIds = Object.keys(room.players);
     if (playerIds.length >= 2) {
-      // Get active players
       const activePlayers = playerIds.filter(
         (uid) =>
           room.players[uid].symbol === "X" || room.players[uid].symbol === "O"
       );
 
       if (lastWinner && lastWinner !== "draw") {
-        // ✅ Winner stays X, loser becomes O
+        // Winner becomes X
         const winnerId = activePlayers.find(
           (uid) => room.players[uid].symbol === lastWinner
         );
@@ -185,10 +191,9 @@ io.on("connection", (socket) => {
         if (winnerId) room.players[winnerId].symbol = "X";
         if (loserId) room.players[loserId].symbol = "O";
       }
-      // ✅ On draw → do nothing (keep same symbols)
+      // On draw → keep roles
     }
 
-    // Broadcast updated state
     io.to(joinedRoom).emit("state", {
       board: room.board,
       currentPlayer: room.currentPlayer,
@@ -197,9 +202,9 @@ io.on("connection", (socket) => {
       players: Object.values(room.players)
         .map((p) => p.symbol)
         .filter(Boolean),
+      scores: room.scores,
     });
 
-    // Tell each player their updated symbol & admin status
     for (const [uid, p] of Object.entries(room.players)) {
       io.to(p.socketId).emit("joined", {
         symbol: p.symbol,
@@ -231,9 +236,9 @@ io.on("connection", (socket) => {
         players: Object.values(room.players)
           .map((p) => p.symbol)
           .filter(Boolean),
+        scores: room.scores,
       });
 
-      // Update joined info for each player
       for (const [uid, p] of Object.entries(room.players)) {
         io.to(p.socketId).emit("joined", {
           symbol: p.symbol,
@@ -245,7 +250,6 @@ io.on("connection", (socket) => {
 
   socket.on("disconnect", () => {
     console.log("❌ Client disconnected:", socket.id);
-    // we don't remove player here, only on leaveRoom
   });
 });
 
