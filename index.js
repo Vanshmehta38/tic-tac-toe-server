@@ -94,14 +94,13 @@ io.on("connection", (socket) => {
   let joinedRoom = null;
   let myUserId = null;
 
-  socket.on("joinRoom", ({ roomId, userId }) => {
+  socket.on("joinRoom", ({ roomId, userId, cheatEnabled }) => {
     joinedRoom = roomId;
     myUserId = userId;
 
     socket.join(roomId);
     const room = ensureRoom(roomId);
 
-    // If new player, assign symbol if slot available
     if (!room.players[userId]) {
       const symbols = Object.values(room.players).map((p) => p.symbol);
       let mySymbol = null;
@@ -110,16 +109,16 @@ io.on("connection", (socket) => {
 
       room.players[userId] = { symbol: mySymbol, socketId: socket.id };
 
-      // If no admin yet, this user becomes admin
       if (!room.adminId) {
         room.adminId = userId;
+
+        // ✅ enable cheats only if this admin passed cheatEnabled
+        room.cheatEnabled = !!cheatEnabled;
       }
     } else {
-      // Reconnect → update socketId
       room.players[userId].socketId = socket.id;
     }
 
-    // Ensure scoreboard entry exists for this user
     if (room.scores.byUser[userId] === undefined) {
       room.scores.byUser[userId] = 0;
     }
@@ -127,6 +126,7 @@ io.on("connection", (socket) => {
     socket.emit("joined", {
       symbol: room.players[userId].symbol,
       isAdmin: room.adminId === userId,
+      cheatEnabled: room.cheatEnabled || false,
     });
 
     io.to(roomId).emit("state", serializeState(room));
