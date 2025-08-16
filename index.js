@@ -37,8 +37,8 @@ function emptyState() {
     currentPlayer: "X",
     winner: null,
     line: null,
-    players: {},
-    adminId: null,
+    players: {}, // { userId: { symbol, socketId } }
+    adminId: null, // userId of admin
   };
 }
 
@@ -73,35 +73,36 @@ io.on("connection", (socket) => {
   console.log("Client connected:", socket.id);
 
   let joinedRoom = null;
+  let myUserId = null;
 
-  socket.on("joinRoom", (roomId) => {
-    console.log(`📥 joinRoom from ${socket.id} -> ${roomId}`);
-
+  socket.on("joinRoom", ({ roomId, userId }) => {
     joinedRoom = roomId;
+    myUserId = userId;
+
     socket.join(roomId);
     const room = ensureRoom(roomId);
 
-    const symbols = Object.values(room.players);
-    let mySymbol = null;
-    if (!symbols.includes("X")) mySymbol = "X";
-    else if (!symbols.includes("O")) mySymbol = "O";
-    else mySymbol = null; // spectator
+    // Assign symbol if new
+    if (!room.players[userId]) {
+      const symbols = Object.values(room.players).map((p) => p.symbol);
+      let mySymbol = null;
+      if (!symbols.includes("X")) mySymbol = "X";
+      else if (!symbols.includes("O")) mySymbol = "O";
 
-    // ✅ assign admin if not set
-    if (!room.adminId) {
-      room.adminId = socket.id;
+      room.players[userId] = { symbol: mySymbol, socketId: socket.id };
+
+      // If no admin, make this user admin
+      if (!room.adminId) {
+        room.adminId = userId;
+      }
+    } else {
+      // Update socketId if reconnected
+      room.players[userId].socketId = socket.id;
     }
 
-    room.players[socket.id] = mySymbol;
-    console.log(
-      `➡️ ${socket.id} assigned as ${mySymbol}, admin=${
-        socket.id === room.adminId
-      }`
-    );
-
     socket.emit("joined", {
-      symbol: mySymbol,
-      isAdmin: socket.id === room.adminId,
+      symbol: room.players[userId].symbol,
+      isAdmin: room.adminId === userId,
     });
 
     io.to(roomId).emit("state", {
@@ -109,25 +110,27 @@ io.on("connection", (socket) => {
       currentPlayer: room.currentPlayer,
       winner: room.winner,
       line: room.line,
-      players: Object.values(room.players).filter(Boolean),
+      players: Object.values(room.players)
+        .map((p) => p.symbol)
+        .filter(Boolean),
     });
   });
 
   socket.on("move", (index) => {
-    if (!joinedRoom) return;
+    if (!joinedRoom || !myUserId) return;
     const room = rooms.get(joinedRoom);
     if (!room) return;
 
-    const mySymbol = room.players[socket.id];
+    const player = room.players[myUserId];
     if (
-      !mySymbol ||
+      !player?.symbol ||
       room.winner ||
       room.board[index] !== null ||
-      room.currentPlayer !== mySymbol
+      room.currentPlayer !== player.symbol
     )
       return;
 
-    room.board[index] = mySymbol;
+    room.board[index] = player.symbol;
     const result = calculateWinner(room.board);
     if (result) {
       room.winner = result.winner;
@@ -141,84 +144,95 @@ io.on("connection", (socket) => {
       currentPlayer: room.currentPlayer,
       winner: room.winner,
       line: room.line,
-      players: Object.values(room.players).filter(Boolean),
+      players: Object.values(room.players)
+        .map((p) => p.symbol)
+        .filter(Boolean),
     });
   });
 
   socket.on("reset", () => {
-    if (!joinedRoom) return;
+    if (!joinedRoom || !myUserId) return;
     const room = rooms.get(joinedRoom);
     if (!room) return;
 
-    // Reset only board state
+    // ✅ Only admin can reset
+    if (myUserId !== room.adminId) return;
+
+    // Reset board state
     room.board = Array(9).fill(null);
     room.currentPlayer = "X";
     room.winner = null;
     room.line = null;
 
-    // Shuffle X and O
+    // ✅ Shuffle X and O among first two players
     const playerIds = Object.keys(room.players);
     if (playerIds.length >= 2) {
       const shuffled = playerIds.sort(() => Math.random() - 0.5);
-      room.players[shuffled[0]] = "X";
-      room.players[shuffled[1]] = "O";
+      room.players[shuffled[0]].symbol = "X";
+      room.players[shuffled[1]].symbol = "O";
       for (let i = 2; i < shuffled.length; i++) {
-        room.players[shuffled[i]] = null;
+        room.players[shuffled[i]].symbol = null; // spectators
       }
     }
 
-    // Broadcast updated state
+    // Broadcast updated state (board + current turn + players)
     io.to(joinedRoom).emit("state", {
       board: room.board,
       currentPlayer: room.currentPlayer,
       winner: room.winner,
       line: room.line,
-      players: Object.values(room.players).filter(Boolean),
+      players: Object.values(room.players)
+        .map((p) => p.symbol)
+        .filter(Boolean),
     });
 
-    // Tell each player their symbol & admin status
-    for (const [id, symbol] of Object.entries(room.players)) {
-      io.to(id).emit("joined", {
-        symbol,
-        isAdmin: id === room.adminId,
+    // ✅ Only send updated symbol info to players (not admin flag again)
+    for (const [uid, p] of Object.entries(room.players)) {
+      io.to(p.socketId).emit("joined", {
+        symbol: p.symbol,
+        isAdmin: uid === room.adminId, // stays same for admin
       });
+    }
+  });
+
+  socket.on("leaveRoom", () => {
+    if (!joinedRoom || !myUserId) return;
+    const room = rooms.get(joinedRoom);
+    if (!room) return;
+
+    delete room.players[myUserId];
+
+    if (room.adminId === myUserId) {
+      const remainingIds = Object.keys(room.players);
+      room.adminId = remainingIds.length > 0 ? remainingIds[0] : null;
+    }
+
+    if (Object.keys(room.players).length === 0) {
+      rooms.delete(joinedRoom);
+    } else {
+      io.to(joinedRoom).emit("state", {
+        board: room.board,
+        currentPlayer: room.currentPlayer,
+        winner: room.winner,
+        line: room.line,
+        players: Object.values(room.players)
+          .map((p) => p.symbol)
+          .filter(Boolean),
+      });
+
+      // Update joined info for each player
+      for (const [uid, p] of Object.entries(room.players)) {
+        io.to(p.socketId).emit("joined", {
+          symbol: p.symbol,
+          isAdmin: uid === room.adminId,
+        });
+      }
     }
   });
 
   socket.on("disconnect", () => {
     console.log("❌ Client disconnected:", socket.id);
-    if (joinedRoom) {
-      const room = rooms.get(joinedRoom);
-      if (room) {
-        delete room.players[socket.id];
-
-        // If admin left, promote first remaining player
-        if (room.adminId === socket.id) {
-          const remainingIds = Object.keys(room.players);
-          room.adminId = remainingIds.length > 0 ? remainingIds[0] : null;
-        }
-
-        if (Object.keys(room.players).length === 0) {
-          rooms.delete(joinedRoom);
-        } else {
-          io.to(joinedRoom).emit("state", {
-            board: room.board,
-            currentPlayer: room.currentPlayer,
-            winner: room.winner,
-            line: room.line,
-            players: Object.values(room.players).filter(Boolean),
-          });
-
-          // Update admin info to everyone
-          for (const [id, symbol] of Object.entries(room.players)) {
-            io.to(id).emit("joined", {
-              symbol,
-              isAdmin: id === room.adminId,
-            });
-          }
-        }
-      }
-    }
+    // we don't remove player here, only on leaveRoom
   });
 });
 
