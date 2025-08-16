@@ -36,6 +36,7 @@ function emptyState() {
     winner: null,
     line: null,
     players: {},
+    adminId: null,
   };
 }
 
@@ -72,9 +73,7 @@ io.on("connection", (socket) => {
   let joinedRoom = null;
 
   socket.on("joinRoom", (roomId) => {
-    console.log(
-      `📥 joinRoom event received from ${socket.id}, room: ${roomId}`
-    );
+    console.log(`📥 joinRoom from ${socket.id} -> ${roomId}`);
 
     joinedRoom = roomId;
     socket.join(roomId);
@@ -86,10 +85,22 @@ io.on("connection", (socket) => {
     else if (!symbols.includes("O")) mySymbol = "O";
     else mySymbol = null; // spectator
 
-    room.players[socket.id] = mySymbol;
-    console.log(`Player ${socket.id} joined ${roomId} as ${mySymbol}`);
+    // ✅ assign admin if not set
+    if (!room.adminId) {
+      room.adminId = socket.id;
+    }
 
-    socket.emit("joined", { symbol: mySymbol });
+    room.players[socket.id] = mySymbol;
+    console.log(
+      `➡️ ${socket.id} assigned as ${mySymbol}, admin=${
+        socket.id === room.adminId
+      }`
+    );
+
+    socket.emit("joined", {
+      symbol: mySymbol,
+      isAdmin: socket.id === room.adminId,
+    });
 
     io.to(roomId).emit("state", {
       board: room.board,
@@ -137,8 +148,24 @@ io.on("connection", (socket) => {
     const room = rooms.get(joinedRoom);
     if (!room) return;
 
-    Object.assign(room, emptyState());
+    // Reset only board state
+    room.board = Array(9).fill(null);
+    room.currentPlayer = "X";
+    room.winner = null;
+    room.line = null;
 
+    // Shuffle X and O
+    const playerIds = Object.keys(room.players);
+    if (playerIds.length >= 2) {
+      const shuffled = playerIds.sort(() => Math.random() - 0.5);
+      room.players[shuffled[0]] = "X";
+      room.players[shuffled[1]] = "O";
+      for (let i = 2; i < shuffled.length; i++) {
+        room.players[shuffled[i]] = null;
+      }
+    }
+
+    // Broadcast updated state
     io.to(joinedRoom).emit("state", {
       board: room.board,
       currentPlayer: room.currentPlayer,
@@ -146,14 +173,29 @@ io.on("connection", (socket) => {
       line: room.line,
       players: Object.values(room.players).filter(Boolean),
     });
+
+    // Tell each player their symbol & admin status
+    for (const [id, symbol] of Object.entries(room.players)) {
+      io.to(id).emit("joined", {
+        symbol,
+        isAdmin: id === room.adminId,
+      });
+    }
   });
 
   socket.on("disconnect", () => {
-    console.log("Client disconnected:", socket.id);
+    console.log("❌ Client disconnected:", socket.id);
     if (joinedRoom) {
       const room = rooms.get(joinedRoom);
       if (room) {
         delete room.players[socket.id];
+
+        // If admin left, promote first remaining player
+        if (room.adminId === socket.id) {
+          const remainingIds = Object.keys(room.players);
+          room.adminId = remainingIds.length > 0 ? remainingIds[0] : null;
+        }
+
         if (Object.keys(room.players).length === 0) {
           rooms.delete(joinedRoom);
         } else {
@@ -164,6 +206,14 @@ io.on("connection", (socket) => {
             line: room.line,
             players: Object.values(room.players).filter(Boolean),
           });
+
+          // Update admin info to everyone
+          for (const [id, symbol] of Object.entries(room.players)) {
+            io.to(id).emit("joined", {
+              symbol,
+              isAdmin: id === room.adminId,
+            });
+          }
         }
       }
     }
