@@ -158,24 +158,37 @@ io.on("connection", (socket) => {
     // ✅ Only admin can reset
     if (myUserId !== room.adminId) return;
 
+    // Save last winner before clearing
+    const lastWinner = room.winner;
+
     // Reset board state
     room.board = Array(9).fill(null);
     room.currentPlayer = "X";
     room.winner = null;
     room.line = null;
 
-    // ✅ Shuffle X and O among first two players
     const playerIds = Object.keys(room.players);
     if (playerIds.length >= 2) {
-      const shuffled = playerIds.sort(() => Math.random() - 0.5);
-      room.players[shuffled[0]].symbol = "X";
-      room.players[shuffled[1]].symbol = "O";
-      for (let i = 2; i < shuffled.length; i++) {
-        room.players[shuffled[i]].symbol = null; // spectators
+      // Get active players
+      const activePlayers = playerIds.filter(
+        (uid) =>
+          room.players[uid].symbol === "X" || room.players[uid].symbol === "O"
+      );
+
+      if (lastWinner && lastWinner !== "draw") {
+        // ✅ Winner stays X, loser becomes O
+        const winnerId = activePlayers.find(
+          (uid) => room.players[uid].symbol === lastWinner
+        );
+        const loserId = activePlayers.find((uid) => uid !== winnerId);
+
+        if (winnerId) room.players[winnerId].symbol = "X";
+        if (loserId) room.players[loserId].symbol = "O";
       }
+      // ✅ On draw → do nothing (keep same symbols)
     }
 
-    // Broadcast updated state (board + current turn + players)
+    // Broadcast updated state
     io.to(joinedRoom).emit("state", {
       board: room.board,
       currentPlayer: room.currentPlayer,
@@ -186,11 +199,11 @@ io.on("connection", (socket) => {
         .filter(Boolean),
     });
 
-    // ✅ Only send updated symbol info to players (not admin flag again)
+    // Tell each player their updated symbol & admin status
     for (const [uid, p] of Object.entries(room.players)) {
       io.to(p.socketId).emit("joined", {
         symbol: p.symbol,
-        isAdmin: uid === room.adminId, // stays same for admin
+        isAdmin: uid === room.adminId,
       });
     }
   });
