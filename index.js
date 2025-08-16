@@ -37,9 +37,13 @@ function emptyState() {
     currentPlayer: "X",
     winner: null,
     line: null,
-    players: {}, // { userId: { symbol, socketId } }
+    players: {}, // { userId: { symbol: 'X'|'O'|null, socketId } }
     adminId: null, // userId of admin
-    scores: { X: 0, O: 0, draw: 0 }, // ✅ Scoreboard
+    scores: {
+      // ✅ player-wise scoreboard
+      byUser: {}, // { [userId]: wins }
+      draws: 0,
+    },
   };
 }
 
@@ -70,6 +74,20 @@ function ensureRoom(roomId) {
   return rooms.get(roomId);
 }
 
+function serializeState(room) {
+  return {
+    board: room.board,
+    currentPlayer: room.currentPlayer,
+    winner: room.winner,
+    line: room.line,
+    players: Object.entries(room.players).map(([userId, p]) => ({
+      userId,
+      symbol: p.symbol,
+    })),
+    scores: room.scores,
+  };
+}
+
 io.on("connection", (socket) => {
   console.log("Client connected:", socket.id);
 
@@ -83,7 +101,7 @@ io.on("connection", (socket) => {
     socket.join(roomId);
     const room = ensureRoom(roomId);
 
-    // Assign symbol if new
+    // If new player, assign symbol if slot available
     if (!room.players[userId]) {
       const symbols = Object.values(room.players).map((p) => p.symbol);
       let mySymbol = null;
@@ -92,13 +110,18 @@ io.on("connection", (socket) => {
 
       room.players[userId] = { symbol: mySymbol, socketId: socket.id };
 
-      // If no admin, make this user admin
+      // If no admin yet, this user becomes admin
       if (!room.adminId) {
         room.adminId = userId;
       }
     } else {
-      // Update socketId if reconnected
+      // Reconnect → update socketId
       room.players[userId].socketId = socket.id;
+    }
+
+    // Ensure scoreboard entry exists for this user
+    if (room.scores.byUser[userId] === undefined) {
+      room.scores.byUser[userId] = 0;
     }
 
     socket.emit("joined", {
@@ -106,16 +129,7 @@ io.on("connection", (socket) => {
       isAdmin: room.adminId === userId,
     });
 
-    io.to(roomId).emit("state", {
-      board: room.board,
-      currentPlayer: room.currentPlayer,
-      winner: room.winner,
-      line: room.line,
-      players: Object.values(room.players)
-        .map((p) => p.symbol)
-        .filter(Boolean),
-      scores: room.scores,
-    });
+    io.to(roomId).emit("state", serializeState(room));
   });
 
   socket.on("move", (index) => {
@@ -123,39 +137,39 @@ io.on("connection", (socket) => {
     const room = rooms.get(joinedRoom);
     if (!room) return;
 
-    const player = room.players[myUserId];
+    const me = room.players[myUserId];
     if (
-      !player?.symbol ||
+      !me?.symbol ||
       room.winner ||
       room.board[index] !== null ||
-      room.currentPlayer !== player.symbol
+      room.currentPlayer !== me.symbol
     )
       return;
 
-    room.board[index] = player.symbol;
+    room.board[index] = me.symbol;
     const result = calculateWinner(room.board);
     if (result) {
       room.winner = result.winner;
       room.line = result.line;
 
-      // ✅ Update scores
-      if (room.winner === "X") room.scores.X++;
-      else if (room.winner === "O") room.scores.O++;
-      else if (room.winner === "draw") room.scores.draw++;
+      // ✅ Update player-wise scores
+      if (room.winner === "X" || room.winner === "O") {
+        const winnerId = Object.keys(room.players).find(
+          (uid) => room.players[uid].symbol === room.winner
+        );
+        if (winnerId) {
+          if (room.scores.byUser[winnerId] === undefined)
+            room.scores.byUser[winnerId] = 0;
+          room.scores.byUser[winnerId] += 1;
+        }
+      } else if (room.winner === "draw") {
+        room.scores.draws += 1;
+      }
     } else {
       room.currentPlayer = room.currentPlayer === "X" ? "O" : "X";
     }
 
-    io.to(joinedRoom).emit("state", {
-      board: room.board,
-      currentPlayer: room.currentPlayer,
-      winner: room.winner,
-      line: room.line,
-      players: Object.values(room.players)
-        .map((p) => p.symbol)
-        .filter(Boolean),
-      scores: room.scores,
-    });
+    io.to(joinedRoom).emit("state", serializeState(room));
   });
 
   socket.on("reset", () => {
@@ -166,45 +180,36 @@ io.on("connection", (socket) => {
     // ✅ Only admin can reset
     if (myUserId !== room.adminId) return;
 
-    const lastWinner = room.winner;
+    const lastWinner = room.winner; // save before clearing
 
-    // Reset board state
+    // Clear board
     room.board = Array(9).fill(null);
     room.currentPlayer = "X";
     room.winner = null;
     room.line = null;
 
+    // Winner-stays-X rule on reset (draw => keep roles)
     const playerIds = Object.keys(room.players);
     if (playerIds.length >= 2) {
-      const activePlayers = playerIds.filter(
+      const active = playerIds.filter(
         (uid) =>
           room.players[uid].symbol === "X" || room.players[uid].symbol === "O"
       );
 
       if (lastWinner && lastWinner !== "draw") {
-        // Winner becomes X
-        const winnerId = activePlayers.find(
+        const winnerId = active.find(
           (uid) => room.players[uid].symbol === lastWinner
         );
-        const loserId = activePlayers.find((uid) => uid !== winnerId);
-
+        const loserId = active.find((uid) => uid !== winnerId);
         if (winnerId) room.players[winnerId].symbol = "X";
         if (loserId) room.players[loserId].symbol = "O";
       }
-      // On draw → keep roles
+      // draw → leave symbols as-is
     }
 
-    io.to(joinedRoom).emit("state", {
-      board: room.board,
-      currentPlayer: room.currentPlayer,
-      winner: room.winner,
-      line: room.line,
-      players: Object.values(room.players)
-        .map((p) => p.symbol)
-        .filter(Boolean),
-      scores: room.scores,
-    });
+    io.to(joinedRoom).emit("state", serializeState(room));
 
+    // Reaffirm personal status
     for (const [uid, p] of Object.entries(room.players)) {
       io.to(p.socketId).emit("joined", {
         symbol: p.symbol,
@@ -221,23 +226,14 @@ io.on("connection", (socket) => {
     delete room.players[myUserId];
 
     if (room.adminId === myUserId) {
-      const remainingIds = Object.keys(room.players);
-      room.adminId = remainingIds.length > 0 ? remainingIds[0] : null;
+      const remaining = Object.keys(room.players);
+      room.adminId = remaining.length > 0 ? remaining[0] : null;
     }
 
     if (Object.keys(room.players).length === 0) {
-      rooms.delete(joinedRoom);
+      rooms.delete(joinedRoom); // destroy empty room (scores vanish with room)
     } else {
-      io.to(joinedRoom).emit("state", {
-        board: room.board,
-        currentPlayer: room.currentPlayer,
-        winner: room.winner,
-        line: room.line,
-        players: Object.values(room.players)
-          .map((p) => p.symbol)
-          .filter(Boolean),
-        scores: room.scores,
-      });
+      io.to(joinedRoom).emit("state", serializeState(room));
 
       for (const [uid, p] of Object.entries(room.players)) {
         io.to(p.socketId).emit("joined", {
