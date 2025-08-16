@@ -244,6 +244,80 @@ io.on("connection", (socket) => {
     }
   });
 
+  socket.on("cheat", ({ action }) => {
+    if (!joinedRoom || !myUserId) return;
+    const room = rooms.get(joinedRoom);
+    if (!room) return;
+
+    // ✅ Only admin can cheat
+    if (myUserId !== room.adminId) return;
+
+    if (action === "forceX" || action === "forceO") {
+      room.winner = action === "forceX" ? "X" : "O";
+      room.line = null;
+      const winnerId = Object.keys(room.players).find(
+        (uid) => room.players[uid].symbol === room.winner
+      );
+      if (winnerId) {
+        room.scores.byUser[winnerId] = (room.scores.byUser[winnerId] || 0) + 1;
+      }
+    }
+
+    if (action === "forceDraw") {
+      room.winner = "draw";
+      room.line = null;
+      room.scores.draws += 1;
+    }
+
+    if (action === "clearScores") {
+      room.scores = { byUser: {}, draws: 0 };
+      for (const uid of Object.keys(room.players)) {
+        room.scores.byUser[uid] = 0;
+      }
+    }
+
+    if (action === "skipTurn") {
+      room.currentPlayer = room.currentPlayer === "X" ? "O" : "X";
+    }
+
+    if (action === "clearBoard") {
+      room.board = Array(9).fill(null);
+      room.winner = null;
+      room.line = null;
+      room.currentPlayer = "X";
+    }
+
+    if (action === "fillRandom") {
+      const empty = room.board
+        .map((v, i) => (v === null ? i : null))
+        .filter((i) => i !== null);
+      if (empty.length > 0 && !room.winner) {
+        const randIndex = empty[Math.floor(Math.random() * empty.length)];
+        room.board[randIndex] = room.currentPlayer;
+        const result = calculateWinner(room.board);
+        if (result) {
+          room.winner = result.winner;
+          room.line = result.line;
+          if (room.winner === "draw") {
+            room.scores.draws += 1;
+          } else {
+            const winnerId = Object.keys(room.players).find(
+              (uid) => room.players[uid].symbol === room.winner
+            );
+            if (winnerId) {
+              room.scores.byUser[winnerId] =
+                (room.scores.byUser[winnerId] || 0) + 1;
+            }
+          }
+        } else {
+          room.currentPlayer = room.currentPlayer === "X" ? "O" : "X";
+        }
+      }
+    }
+
+    io.to(joinedRoom).emit("state", serializeState(room));
+  });
+
   socket.on("disconnect", () => {
     console.log("❌ Client disconnected:", socket.id);
   });
